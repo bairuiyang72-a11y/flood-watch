@@ -23,6 +23,10 @@
   .leaflet-popup-content-wrapper{background:#1e293b;color:#e2e8f0;border:1px solid rgba(129,140,248,.45);border-radius:.6rem;box-shadow:0 6px 20px rgba(2,6,23,.6)}
   .leaflet-popup-tip{background:#1e293b}
   .leaflet-popup-content{margin:8px 12px;font-size:12px;line-height:1.7}
+  /* 内涝易发区标注(非监测站): 地级市=橙圆点 / 县域=黄菱形 / 村镇=红三角 */
+  .hs-city{width:11px;height:11px;border-radius:50%;background:#fb923c;border:2px solid rgba(255,255,255,.85);box-shadow:0 0 8px #fb923c}
+  .hs-county{width:10px;height:10px;background:#facc15;border:2px solid rgba(255,255,255,.85);transform:rotate(45deg);box-shadow:0 0 8px #facc15}
+  .hs-village{width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:11px solid #f87171;filter:drop-shadow(0 0 4px #f87171)}
   /* 监控画面 HUD: 四角框线/扫描线/暗角, 模拟真实监控大屏 */
   .hud{position:absolute;inset:0;pointer-events:none}
   .hud::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(255,255,255,.025) 0 1px,transparent 1px 3px)}
@@ -67,7 +71,7 @@
             <button id="btnSat" onclick="setBase('sat')" class="px-3 py-1 bg-indigo-600 text-white">卫星影像</button>
             <button id="btnRoad" onclick="setBase('road')" class="px-3 py-1 bg-slate-800 text-slate-300">路网地图</button>
           </div>
-          <span class="text-xs text-slate-400" id="mapTip">点击城市切换监测站 · 颜色=风险等级</span>
+          <span class="text-xs text-slate-400" id="mapTip">点击城市切换监测站 · 橙/黄/红=易发区标注 · 颜色=风险等级</span>
         </div>
       </div>
       <div class="relative mb-2">
@@ -82,6 +86,10 @@
           <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#eab308"></i>L2 较低风险</p>
           <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#f97316"></i>L3 中风险</p>
           <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#ef4444"></i>L4 高风险</p>
+          <p class="text-slate-300 font-semibold pt-1 border-t border-indigo-500/25 mt-1">易发区标注</p>
+          <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#fb923c"></i>内涝高发城市</p>
+          <p><i class="inline-block w-2 h-2 mr-1.5 rotate-45" style="background:#facc15"></i>内涝多发县域</p>
+          <p><i class="inline-block mr-1.5" style="width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:9px solid #f87171"></i>高危易涝村镇</p>
         </div>
       </div>
     </section>
@@ -248,25 +256,66 @@ function renderMap(cities){
   });
 }
 
+/* ---------- 内涝易发区标注(非监测站): 地级市/县域/村镇 ---------- */
+const HS_TYPE={city:{cls:'hs-city',name:'内涝高发城市',color:'#fb923c',zoom:9},
+               county:{cls:'hs-county',name:'内涝多发县域',color:'#facc15',zoom:10},
+               village:{cls:'hs-village',name:'高危易涝村镇',color:'#f87171',zoom:11}};
+let hotspots=[], hsLayer=null;
+async function loadHotspots(){
+  try{
+    hotspots=await (await fetch('/api/hotspots')).json();
+    renderHotspots();
+  }catch(e){setConn(false);}
+}
+function renderHotspots(){
+  if(!map)return;
+  if(!hsLayer){hsLayer=L.layerGroup().addTo(map);}
+  hsLayer.clearLayers();
+  hotspots.forEach(h=>{
+    const t=HS_TYPE[h.type]||HS_TYPE.county;
+    const mk=L.marker([h.lat,h.lng],{icon:L.divIcon({className:'',iconSize:[16,16],iconAnchor:[8,8],
+      html:`<div class="${t.cls}"></div>`})}).addTo(hsLayer);
+    mk.bindPopup(`<b style="font-size:13px">${h.parent} · ${h.name}</b><br>`+
+      `<span style="color:${t.color}">${t.name}</span><br>`+
+      `<span style="color:#cbd5e1">${h.desc}</span>`);
+    mk.on('click',()=>{map.flyTo([h.lat,h.lng],t.zoom,{duration:1.0});});
+    h._marker=mk;
+  });
+}
+
 /* ---------- 省市搜索 ---------- */
 function setupSearch(){
   const box=$('searchBox'),res=$('searchResults');
   box.addEventListener('input',()=>{
     const q=box.value.trim();
     if(!q){res.classList.add('hidden');return;}
-    const hits=allCities.filter(c=>(c.province||'').includes(q)||c.name.includes(q)).slice(0,10);
-    res.innerHTML=hits.length?hits.map((c,i)=>
-      `<li data-i="${i}" class="px-3 py-2 cursor-pointer hover:bg-indigo-700/50 text-sm flex justify-between">`+
-      `<span>${c.province} · ${c.name}</span>`+
-      `<span style="color:${LEVEL_COLOR[c.level]}">L${c.level} ${c.level_name}</span></li>`).join('')
+    const cs=allCities.filter(c=>(c.province||'').includes(q)||c.name.includes(q))
+      .map(c=>({kind:'city',c}));
+    const hs=hotspots.filter(h=>(h.province||'').includes(q)||h.name.includes(q)||(h.parent||'').includes(q))
+      .map(h=>({kind:'hs',h}));
+    const hits=cs.concat(hs).slice(0,12);
+    res.innerHTML=hits.length?hits.map((x,i)=>{
+      const label=x.kind==='city'
+        ?`<span>${x.c.province} · ${x.c.name}</span><span style="color:${LEVEL_COLOR[x.c.level]}">L${x.c.level} ${x.c.level_name}</span>`
+        :`<span>${x.h.parent} · ${x.h.name}</span><span style="color:${HS_TYPE[x.h.type].color}">${HS_TYPE[x.h.type].name}</span>`;
+      return `<li data-i="${i}" class="px-3 py-2 cursor-pointer hover:bg-indigo-700/50 text-sm flex justify-between">${label}</li>`;
+    }).join('')
       :'<li class="px-3 py-2 text-xs text-slate-400">未找到相关省市</li>';
     res.classList.remove('hidden');
     res.querySelectorAll('li[data-i]').forEach(li=>li.onclick=()=>{
-      const c=hits[+li.dataset.i];
-      res.classList.add('hidden');box.value=c.name;
-      map.flyTo([c.lat,c.lng],9,{duration:1.2});
-      markers[c.name]&&markers[c.name].openPopup();
-      selectCity(c.name);
+      const x=hits[+li.dataset.i];
+      res.classList.add('hidden');
+      if(x.kind==='city'){
+        box.value=x.c.name;
+        map.flyTo([x.c.lat,x.c.lng],9,{duration:1.2});
+        markers[x.c.name]&&markers[x.c.name].openPopup();
+        selectCity(x.c.name);
+      }else{
+        const t=HS_TYPE[x.h.type];
+        box.value=x.h.name;
+        map.flyTo([x.h.lat,x.h.lng],t.zoom,{duration:1.2});
+        x.h._marker&&x.h._marker.openPopup();
+      }
     });
   });
   document.addEventListener('click',e=>{
@@ -422,6 +471,7 @@ document.addEventListener('visibilitychange',()=>{
 window.addEventListener('load',()=>{
   initMap();initSatMap();setupSearch();
   setTimeout(pollCities,100);          // 第 1 波: 城市列表
+  setTimeout(loadHotspots,300);        // 第 1.5 波: 易发区标注
   setTimeout(()=>selectCity('武汉'),450); // 第 2 波: 触发状态/事件查询
   setTimeout(snapLoop,800);            // 第 3 波: 视频帧轮询
   setTimeout(startPolls,1200);         // 第 4 波: 周期定时器

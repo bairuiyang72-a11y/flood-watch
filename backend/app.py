@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from .analyzer import llm, objects, risk, water
 from .cities import CITIES
 from .events import EventStore
+from .hotspots import HOTSPOTS
 from .video_source import SimulatedSource, FileOrCameraSource
 from .weather import WeatherService
 
@@ -178,6 +179,12 @@ def api_cities():
                     "weather": weather.snapshot(c["name"]),
                     "fps": round(a.fps, 1)})
     return out
+
+
+@app.get("/api/hotspots")
+def api_hotspots():
+    """全国内涝易发区地图标注(地级市/县域/村镇), 仅作态势标注不参与视频分析。"""
+    return HOTSPOTS
 
 
 @app.get("/api/status")
