@@ -370,23 +370,42 @@ async function pollCities(){
   try{
     const cs=await (await fetch('/api/cities')).json();
     setConn(true);
-    allCities=cs;
-    updateSat(currentCity);
-    renderMap(cs);
-    $('nCities').textContent=cs.length;
-    $('nCams').textContent=cs.reduce((s,c)=>s+c.cams_online,0);
-    $('nHigh').textContent=cs.filter(c=>c.level>=3).length;
-    $('nWading').textContent=cs.filter(c=>c.persons_in_water>0).length;
-    const sel=$('citySel');
-    if(sel.options.length!==cs.length) sel.innerHTML=cs.map(c=>`<option>${c.name}</option>`).join('');
-    if(!cs.find(c=>c.name===currentCity)) selectCity(cs[0].name);
+    applyCities(cs);
+  }catch(e){setConn(false);}
+}
+function applyCities(cs){
+  allCities=cs;
+  updateSat(currentCity);
+  renderMap(cs);
+  $('nCities').textContent=cs.length;
+  $('nCams').textContent=cs.reduce((s,c)=>s+c.cams_online,0);
+  $('nHigh').textContent=cs.filter(c=>c.level>=3).length;
+  $('nWading').textContent=cs.filter(c=>c.persons_in_water>0).length;
+  const sel=$('citySel');
+  if(sel.options.length!==cs.length) sel.innerHTML=cs.map(c=>`<option>${c.name}</option>`).join('');
+  if(!cs.find(c=>c.name===currentCity)) selectCity(cs[0].name);
+}
+/* 首屏引导: 城市列表+易发区标注+默认城市状态/事件合并为单个请求,
+   页面加载中途刷新时在途请求几乎为零, 消除批量 net::ERR_ABORTED */
+async function loadBootstrap(){
+  try{
+    const d=await (await fetch('/api/bootstrap?city='+encodeURIComponent(currentCity))).json();
+    setConn(true);
+    applyCities(d.cities);
+    hotspots=d.hotspots; renderHotspots();
+    applyStatus(d.status);
+    applyEvents(d.events);
   }catch(e){setConn(false);}
 }
 async function pollStatus(){
   try{
     const s=await (await fetch('/api/status?city='+encodeURIComponent(currentCity))).json();
     setConn(true);
-    const m=s.metrics;
+    applyStatus(s);
+  }catch(e){setConn(false);}
+}
+function applyStatus(s){
+  const m=s.metrics;
     $('camName').textContent=`${s.city} · ${s.cam} 实时内涝检测`;
     const st=$('srcTag');
     if(s.source_kind==='file'){
@@ -412,20 +431,22 @@ async function pollStatus(){
       $('aiAdvice').textContent=s.judgment.advice;
       $('aiSrc').textContent=s.judgment.source==='llm'?'大模型在线':'离线预案';
     }
-  }catch(e){setConn(false);}
 }
 async function pollEvents(){
   try{
     const evs=await (await fetch('/api/events?city='+encodeURIComponent(currentCity))).json();
     setConn(true);
-    $('eventList').innerHTML=evs.slice(0,12).map(e=>`
+    applyEvents(evs);
+  }catch(e){setConn(false);}
+}
+function applyEvents(evs){
+  $('eventList').innerHTML=evs.slice(0,12).map(e=>`
       <li class="p-3 rounded-lg bg-slate-800/70 border-l-4" style="border-color:${LEVEL_COLOR[e.level]}">
         <div class="flex justify-between text-xs text-slate-400"><span>${e.time}</span>
         <span class="${e.status==='待处置'?'text-rose-400 badge':'text-emerald-400'}">${e.status}</span></div>
         <p class="mt-1"><b class="text-slate-100">[${e.type}]</b> ${e.summary}</p>
         ${e.status==='待处置'?`<button onclick="ack('${e.id}')" class="mt-2 text-xs px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500">受理处置</button>`:''}
       </li>`).join('')||'<li class="text-slate-500 text-xs">该城市暂无事件</li>';
-  }catch(e){setConn(false);}
 }
 async function ack(id){await fetch(`/api/events/${id}/ack`,{method:'POST'});pollEvents();}
 
@@ -466,15 +487,13 @@ function startPolls(){stopPolls();timers=[setInterval(pollStatus,2000),setInterv
 function stopPolls(){timers.forEach(clearInterval);timers=[];}
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden)stopPolls();
-  else{pollCities();setTimeout(pollStatus,300);setTimeout(pollEvents,600);startPolls();}
+  else{loadBootstrap();startPolls();}
 });
 window.addEventListener('load',()=>{
   initMap();initSatMap();setupSearch();
-  setTimeout(pollCities,100);          // 第 1 波: 城市列表
-  setTimeout(loadHotspots,300);        // 第 1.5 波: 易发区标注
-  setTimeout(()=>selectCity('武汉'),450); // 第 2 波: 触发状态/事件查询
-  setTimeout(snapLoop,800);            // 第 3 波: 视频帧轮询
-  setTimeout(startPolls,1200);         // 第 4 波: 周期定时器
+  loadBootstrap();               // 首屏: 单请求返回 城市+标注+状态+事件(替代原 4 波 6 请求)
+  setTimeout(snapLoop,600);      // 第 2 波: 视频帧链式轮询
+  setTimeout(startPolls,1500);   // 第 3 波: 周期定时器
 });
 </script>
 </body>
