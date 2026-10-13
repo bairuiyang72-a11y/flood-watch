@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn>=0.27
+opencv-python>=4.8
+numpy>=1.24
+
+# 可选: 真实目标检测模型(GPU)
+# ultralytics>=8.0
+# 可选: SAM/LSM-Adapter 大模型分割基线(论文复现)
+# segment-anything

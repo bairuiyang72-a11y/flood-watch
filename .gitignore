@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+backend/events.json
+*.log
+.venv/
+uploads/
+.tilecache/
+

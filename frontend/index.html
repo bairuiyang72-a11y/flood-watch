@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>城市洪涝监测与公安应急处置平台</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body{font-family:"Microsoft YaHei",system-ui,sans-serif;background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 55%,#312e81 100%);min-height:100vh;color:#e2e8f0}
+  .card{background:rgba(30,41,59,.72);border:1px solid rgba(129,140,248,.25);border-radius:1rem;box-shadow:0 8px 28px rgba(2,6,23,.5);backdrop-filter:blur(6px)}
+  .glow{background:linear-gradient(90deg,#4f46e5,#a78bfa,#7c3aed);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .badge{animation:pulse 1.6s infinite}
+  @keyframes pulse{50%{opacity:.55}}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#4f46e5;border-radius:3px}
+  select{background:#1e293b;border:1px solid rgba(129,140,248,.4);border-radius:.5rem;padding:.3rem .6rem;color:#e2e8f0;font-size:.85rem}
+  /* Leaflet 高德地图上的城市风险点(涟漪动画) */
+  .city-dot{position:relative;width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,.9);box-shadow:0 0 10px currentColor}
+  .city-dot.high::after{content:'';position:absolute;inset:-6px;border-radius:50%;border:2px solid currentColor;animation:ripple 1.8s ease-out infinite}
+  @keyframes ripple{0%{transform:scale(.5);opacity:.9}100%{transform:scale(1.9);opacity:0}}
+  .leaflet-container{background:#0f172a;border-radius:.75rem}
+  .leaflet-popup-content-wrapper{background:#1e293b;color:#e2e8f0;border:1px solid rgba(129,140,248,.45);border-radius:.6rem;box-shadow:0 6px 20px rgba(2,6,23,.6)}
+  .leaflet-popup-tip{background:#1e293b}
+  .leaflet-popup-content{margin:8px 12px;font-size:12px;line-height:1.7}
+  /* 监控画面 HUD: 四角框线/扫描线/暗角, 模拟真实监控大屏 */
+  .hud{position:absolute;inset:0;pointer-events:none}
+  .hud::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(255,255,255,.025) 0 1px,transparent 1px 3px)}
+  .hud::after{content:'';position:absolute;inset:0;box-shadow:inset 0 0 70px rgba(0,0,0,.6)}
+  .corner{position:absolute;width:20px;height:20px;border:0 solid #34d399cc}
+  .corner.tl{top:7px;left:7px;border-left-width:2px;border-top-width:2px}
+  .corner.tr{top:7px;right:7px;border-right-width:2px;border-top-width:2px}
+  .corner.bl{bottom:7px;left:7px;border-left-width:2px;border-bottom-width:2px}
+  .corner.br{bottom:7px;right:7px;border-right-width:2px;border-bottom-width:2px}
+</style>
+</head>
+<body class="p-4 md:p-6">
+  <!-- 顶栏 -->
+  <header class="flex flex-wrap items-center justify-between gap-3 mb-5">
+    <div>
+      <h1 class="text-2xl md:text-3xl font-bold glow">城市洪涝监测与公安应急处置平台</h1>
+      <p class="text-xs text-slate-400 mt-1">基于多模态智能模型 · 全国一张图 + 视频分割 + 目标检测 + 大模型研判 (Flood-Watch)</p>
+    </div>
+    <div class="flex flex-wrap items-center gap-3">
+      <select id="citySel" onchange="selectCity(this.value)"></select>
+      <span id="connTag" class="text-xs px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">● 已连接</span>
+      <span id="clock" class="text-sm text-indigo-300 font-mono"></span>
+      <span id="riskBadge" class="badge px-4 py-1.5 rounded-full text-sm font-bold text-white bg-green-500">低风险</span>
+    </div>
+  </header>
+
+  <!-- 全国概览条 -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div class="card p-3 text-center"><p class="text-xs text-slate-400">监测城市</p><p class="text-xl font-bold text-indigo-300" id="nCities">0</p></div>
+    <div class="card p-3 text-center"><p class="text-xs text-slate-400">在线检测站</p><p class="text-xl font-bold text-sky-300" id="nCams">0</p></div>
+    <div class="card p-3 text-center"><p class="text-xs text-slate-400">中高风险城市</p><p class="text-xl font-bold text-orange-300" id="nHigh">0</p></div>
+    <div class="card p-3 text-center"><p class="text-xs text-slate-400">全国涉水告警</p><p class="text-xl font-bold text-rose-300" id="nWading">0</p></div>
+  </div>
+
+  <main class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    <!-- 高德地图 -->
+    <section class="lg:col-span-2 card p-4">
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+        <h2 class="font-semibold text-indigo-200">🗺️ 全国城市内涝监测一张图（高德地图）</h2>
+        <div class="flex items-center gap-2">
+          <div class="flex rounded-lg overflow-hidden border border-indigo-500/40 text-xs">
+            <button id="btnSat" onclick="setBase('sat')" class="px-3 py-1 bg-indigo-600 text-white">卫星影像</button>
+            <button id="btnRoad" onclick="setBase('road')" class="px-3 py-1 bg-slate-800 text-slate-300">路网地图</button>
+          </div>
+          <span class="text-xs text-slate-400" id="mapTip">点击城市切换监测站 · 颜色=风险等级</span>
+        </div>
+      </div>
+      <div class="relative mb-2">
+        <input id="searchBox" type="text" autocomplete="off" placeholder="🔍 搜索省 / 市，如：湖北、广东、武汉…"
+               class="w-full rounded-lg bg-slate-800/80 border border-indigo-500/35 px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-indigo-400">
+        <ul id="searchResults" class="hidden absolute z-[1000] left-0 right-0 top-full mt-1 rounded-lg bg-slate-800/95 border border-indigo-500/35 overflow-hidden shadow-xl"></ul>
+      </div>
+      <div id="chinaMap" style="height:420px" class="relative">
+        <div class="absolute bottom-3 left-3 z-[900] card px-3 py-2 text-[11px] space-y-1">
+          <p class="text-slate-300 font-semibold">风险等级图例</p>
+          <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#22c55e"></i>L1 低风险</p>
+          <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#eab308"></i>L2 较低风险</p>
+          <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#f97316"></i>L3 中风险</p>
+          <p><i class="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style="background:#ef4444"></i>L4 高风险</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右栏 -->
+    <aside class="space-y-4">
+      <section class="card p-4">
+        <h2 class="font-semibold text-indigo-200 mb-2">🤖 AI 多模态应急研判 <span id="aiSrc" class="text-[10px] px-2 py-0.5 rounded bg-violet-700/60">离线预案</span></h2>
+        <p id="aiSummary" class="text-sm leading-6 text-slate-200">等待分析…</p>
+        <div class="mt-3 p-3 rounded-lg bg-indigo-950/60 border border-indigo-500/20">
+          <p class="text-xs text-indigo-300 mb-1">处置建议</p>
+          <p id="aiAdvice" class="text-sm leading-6 text-slate-300">—</p>
+        </div>
+      </section>
+      <section class="card p-4">
+        <h2 class="font-semibold text-indigo-200 mb-2">🚨 告警事件 <span class="text-xs text-slate-400" id="evCityTag"></span></h2>
+        <ul id="eventList" class="space-y-2 max-h-[20rem] overflow-y-auto pr-1 text-sm"></ul>
+      </section>
+    </aside>
+
+    <!-- 视频区 -->
+    <section class="lg:col-span-2 card p-4">
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div class="flex items-center gap-2">
+          <h2 class="font-semibold text-indigo-200" id="camName">实时内涝检测</h2>
+          <span id="srcTag" class="hidden text-xs px-2 py-1 rounded-lg bg-amber-600/70 border border-amber-400/50 text-amber-100"></span>
+          <span id="wxChip" class="text-xs px-2 py-1 rounded-lg bg-sky-900/60 border border-sky-500/35 text-sky-200 hidden"></span>
+          <button id="btnWxVerify" class="text-xs px-2 py-1 rounded-lg bg-emerald-800/70 border border-emerald-500/40 text-emerald-200 hover:bg-emerald-700">🔍 天气验真</button>
+        </div>
+        <div class="flex gap-2 text-xs">
+          <button id="btnUpload" class="px-3 py-1 rounded-lg bg-amber-600/70 hover:bg-amber-500 border border-amber-500/40 text-amber-50">📤 上传监控视频</button>
+          <button id="btnSim" class="px-3 py-1 rounded-lg bg-slate-700/70 hover:bg-slate-600 border border-slate-500/40 text-slate-200">恢复模拟画面</button>
+          <input type="file" id="fileInput" accept="video/*,.mkv,.flv" class="hidden">
+          <button id="btnMask" class="px-3 py-1 rounded-lg bg-indigo-600/60 hover:bg-indigo-500">积水掩码</button>
+          <span class="px-3 py-1 rounded-lg bg-slate-700/60">FPS <b id="fps" class="text-emerald-300">-</b></span>
+          <span class="px-3 py-1 rounded-lg bg-slate-700/60">检测器 <b id="detector" class="text-emerald-300">-</b></span>
+        </div>
+      </div>
+      <div id="wxVerify" class="hidden text-[11px] leading-5 mb-2 px-3 py-1.5 rounded-lg bg-sky-950/60 border border-sky-500/25 text-sky-200"></div>
+      <div class="relative rounded-xl overflow-hidden border border-indigo-500/30 bg-black">
+        <img id="feed" class="w-full" alt="监控视频">
+        <img id="mask" src="/mask.png" class="hidden absolute inset-0 w-full opacity-70" alt="积水掩码">
+        <div class="hud">
+          <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+          <span class="absolute top-2 left-1/2 -translate-x-1/2 text-[11px] px-2 py-0.5 rounded bg-black/55 text-emerald-300 border border-emerald-500/40 badge">● LIVE · AI 实时分析中</span>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+        <div class="card p-3 text-center"><p class="text-xs text-slate-400">积水面积占比</p><p class="text-2xl font-bold text-sky-300" id="mRatio">0%</p></div>
+        <div class="card p-3 text-center"><p class="text-xs text-slate-400">风险等级</p><p class="text-2xl font-bold" id="mLevel">L1</p></div>
+        <div class="card p-3 text-center"><p class="text-xs text-slate-400">涉水人员</p><p class="text-2xl font-bold text-rose-300" id="mPersons">0</p></div>
+        <div class="card p-3 text-center"><p class="text-xs text-slate-400">今日事件</p><p class="text-2xl font-bold text-violet-300" id="mEvents">0</p></div>
+      </div>
+      <div class="mt-4"><p class="text-xs text-slate-400 mb-1">积水占比趋势 (%)</p>
+        <canvas id="trend" height="90" class="w-full rounded-lg bg-slate-900/60"></canvas>
+      </div>
+      <div class="mt-4">
+        <p class="text-xs text-slate-400 mb-1">🛰 卫星影像 · 检测站真实街道定位 <span id="satTip" class="text-indigo-300"></span></p>
+        <div id="satMap" style="height:260px" class="rounded-lg border border-indigo-500/30"></div>
+      </div>
+    </section>
+  </main>
+
+<script>
+const $=id=>document.getElementById(id);
+const LEVEL_COLOR={1:'#22c55e',2:'#eab308',3:'#f97316',4:'#ef4444'};
+let currentCity='武汉', map=null, markers={}, allCities=[], hist=[], connected=true;
+
+/* 连接状态指示: 服务重启/断网时提示并自动重试 */
+function setConn(ok){
+  if(ok===connected)return;connected=ok;
+  const t=$('connTag');
+  t.textContent=ok?'● 已连接':'● 连接中断, 自动重试中';
+  t.className='text-xs px-2.5 py-1 rounded-full border '+(ok?'bg-emerald-500/20 text-emerald-300 border-emerald-500/40':'bg-rose-500/20 text-rose-300 border-rose-500/40 badge');
+}
+
+setInterval(()=>$('clock').textContent=new Date().toLocaleString('zh-CN'),1000);
+$('btnMask').onclick=()=>$('mask').classList.toggle('hidden');
+
+/* ---------- 真实监控视频接入: 上传录像热切换视频源 ---------- */
+$('btnUpload').onclick=()=>{if(!$('btnUpload').disabled)$('fileInput').click();};
+$('fileInput').onchange=async e=>{
+  const f=e.target.files[0]; if(!f)return;
+  const btn=$('btnUpload'); btn.disabled=true; btn.textContent='⏳ 上传分析中…';
+  const fd=new FormData();
+  fd.append('city',currentCity); fd.append('file',f);
+  try{
+    const r=await fetch('/api/video/upload',{method:'POST',body:fd});
+    const j=await r.json();
+    if(j.ok){pollStatus();}
+    else alert('上传失败: '+(j.error||'未知错误'));
+  }catch(err){alert('上传请求失败, 请检查服务状态');}
+  btn.disabled=false; btn.textContent='📤 上传监控视频';
+  e.target.value='';
+};
+$('btnSim').onclick=async()=>{
+  const btn=$('btnSim'); btn.disabled=true;
+  try{
+    const fd=new FormData(); fd.append('city',currentCity);
+    const j=await (await fetch('/api/video/sim',{method:'POST',body:fd})).json();
+    if(j.ok)pollStatus(); else alert('恢复失败: '+(j.error||''));
+  }catch(e){alert('请求失败');}
+  btn.disabled=false;
+};
+
+/* ---------- 高德瓦片地图 (Leaflet): 卫星影像/路网双底图 ---------- */
+const TILE_OPT={subdomains:['1','2','3','4'],minZoom:3,maxZoom:18,
+  // 减少平移/缩放过程中瓦片请求的频繁取消(ERR_ABORTED)
+  updateWhenIdle:true,updateWhenZooming:false,keepBuffer:6};
+/* 在途瓦片延后删除: 视图变化时 Leaflet 默认会移除"加载中"的瓦片并置空 img.src,
+   浏览器随即取消该请求报 net::ERR_ABORTED; 此处改为等加载完成后再删, 根源消除会话内 abort */
+(function(){
+  const orig=L.TileLayer.prototype._removeTile;
+  L.TileLayer.prototype._removeTile=function(key){
+    const t=this._tiles&&this._tiles[key];
+    if(t&&!t.loaded){t.pendingRemove=true;return;}
+    orig.call(this,key);
+  };
+  L.TileLayer.addInitHook(function(){
+    const done=e=>{for(const k in this._tiles){const t=this._tiles[k];
+      if(t.el===e.tile&&t.pendingRemove){t.pendingRemove=false;orig.call(this,k);return;}}};
+    this.on('tileload tileerror',done);
+  });
+})();
+let roadLayer,satLayer,satLabel,baseSat=true;
+function initMap(){
+  map=L.map('chinaMap',{zoomControl:true,attributionControl:false,maxZoom:12}).setView([34.5,108.5],5);
+  roadLayer=L.tileLayer('/tiles/road/{z}/{x}/{y}',TILE_OPT);
+  satLayer=L.tileLayer('/tiles/img/{z}/{x}/{y}',TILE_OPT);
+  satLabel=L.tileLayer('/tiles/label/{z}/{x}/{y}',TILE_OPT); // 卫星图上的路网/地名注记
+  satLayer.addTo(map);satLabel.addTo(map);
+}
+function setBase(kind){
+  baseSat=(kind==='sat');
+  if(baseSat){roadLayer.remove();satLayer.addTo(map);satLabel.addTo(map);}
+  else{satLayer.remove();satLabel.remove();roadLayer.addTo(map);}
+  $('btnSat').className='px-3 py-1 '+(baseSat?'bg-indigo-600 text-white':'bg-slate-800 text-slate-300');
+  $('btnRoad').className='px-3 py-1 '+(!baseSat?'bg-indigo-600 text-white':'bg-slate-800 text-slate-300');
+}
+function dotIcon(level){
+  const c=LEVEL_COLOR[level];
+  return L.divIcon({className:'',iconSize:[16,16],iconAnchor:[8,8],
+    html:`<div class="city-dot ${level>=3?'high':''}" style="background:${c};color:${c}"></div>`});
+}
+function renderMap(cities){
+  cities.forEach(c=>{
+    let mk=markers[c.name];
+    if(!mk){
+      mk=L.marker([c.lat,c.lng],{icon:dotIcon(c.level)}).addTo(map);
+      mk.on('click',()=>selectCity(c.name));
+      markers[c.name]=mk;
+      mk._level=c.level;
+    }else if(mk._level!==c.level){
+      mk.setIcon(dotIcon(c.level));mk._level=c.level;
+    }
+    const wx=c.weather&&c.weather.desc?`天气: ${c.weather.desc} ${c.weather.temp??'—'}°C · 降雨 ${c.weather.precip??0}mm/h<br/>`:'';
+    mk.bindPopup(
+      `<b style="font-size:13px">${c.province} · ${c.name}</b><br>`+
+      `风险等级: <span style="color:${LEVEL_COLOR[c.level]}">L${c.level} ${c.level_name}</span><br>`+
+      `积水占比: ${(c.water_ratio*100).toFixed(1)}%<br>`+
+      wx+
+      `在线检测站: ${c.cams_online} 路<br>`+
+      `<span style="color:#818cf8">点击标记可切换到该城市监测</span>`);
+  });
+}
+
+/* ---------- 省市搜索 ---------- */
+function setupSearch(){
+  const box=$('searchBox'),res=$('searchResults');
+  box.addEventListener('input',()=>{
+    const q=box.value.trim();
+    if(!q){res.classList.add('hidden');return;}
+    const hits=allCities.filter(c=>(c.province||'').includes(q)||c.name.includes(q)).slice(0,10);
+    res.innerHTML=hits.length?hits.map((c,i)=>
+      `<li data-i="${i}" class="px-3 py-2 cursor-pointer hover:bg-indigo-700/50 text-sm flex justify-between">`+
+      `<span>${c.province} · ${c.name}</span>`+
+      `<span style="color:${LEVEL_COLOR[c.level]}">L${c.level} ${c.level_name}</span></li>`).join('')
+      :'<li class="px-3 py-2 text-xs text-slate-400">未找到相关省市</li>';
+    res.classList.remove('hidden');
+    res.querySelectorAll('li[data-i]').forEach(li=>li.onclick=()=>{
+      const c=hits[+li.dataset.i];
+      res.classList.add('hidden');box.value=c.name;
+      map.flyTo([c.lat,c.lng],9,{duration:1.2});
+      markers[c.name]&&markers[c.name].openPopup();
+      selectCity(c.name);
+    });
+  });
+  document.addEventListener('click',e=>{
+    if(!e.target.closest('#searchBox')&&!e.target.closest('#searchResults'))res.classList.add('hidden');
+  });
+}
+
+/* ---------- 城市切换 ---------- */
+function selectCity(name){
+  // 同一城市重复选择时不重设资源, 避免无谓请求被取消
+  if(name===currentCity&&$('feed').dataset.loaded===name)return;
+  currentCity=name;hist=[];
+  $('citySel').value=name;
+  $('feed').dataset.loaded=name;
+  $('mask').src=`/mask.png?city=${encodeURIComponent(name)}`;
+  $('evCityTag').textContent='· '+name;
+  $('wxVerify').classList.add('hidden');
+  updateSat(name);
+  pollStatus(); pollEvents();
+}
+
+/* ---------- 卫星街景定位: 高德卫星影像 z16 显示检测站真实街道 ---------- */
+let satMap=null,satMarker=null;
+function initSatMap(){
+  satMap=L.map('satMap',{zoomControl:true,attributionControl:false,dragging:true,maxZoom:16}).setView([30.59,114.31],16);
+  L.tileLayer('/tiles/img/{z}/{x}/{y}',TILE_OPT).addTo(satMap);
+  L.tileLayer('/tiles/label/{z}/{x}/{y}',TILE_OPT).addTo(satMap);
+  satMarker=L.marker([30.59,114.31],{icon:L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],
+    html:'<div style="width:26px;height:26px;border:2px solid #ef4444;border-radius:50%;background:radial-gradient(circle,rgba(239,68,68,.9) 0 4px,transparent 4px);box-shadow:0 0 0 3px rgba(239,68,68,.3),0 0 14px rgba(239,68,68,.9)"></div>'})}).addTo(satMap);
+}
+function updateSat(name){
+  const c=allCities.find(x=>x.name===name);
+  if(!c||!satMap)return;
+  satMap.setView([c.lat,c.lng],16);
+  satMarker.setLatLng([c.lat,c.lng]);
+  $('satTip').textContent=`· ${c.province||''}${c.name} ${c.cam} (${c.lng.toFixed(2)}°E, ${c.lat.toFixed(2)}°N)`;
+}
+
+/* ---------- 天气验真: 双独立气象源交叉核对 ---------- */
+$('btnWxVerify').onclick=async()=>{
+  const el=$('wxVerify');el.classList.remove('hidden');
+  el.textContent=`正在拉取第二气象源(wttr.in)对 ${currentCity} 交叉验证…`;
+  try{
+    const v=await (await fetch('/api/weather/verify?city='+encodeURIComponent(currentCity))).json();
+    if(v.error){el.textContent='⚠️ '+v.error;return;}
+    el.innerHTML=`源A <b>Open-Meteo</b>: ${v.om.temp}°C ${v.om.desc} · 雨强 ${v.om.precip}mm/h · 24h ${v.om.precip_24h}mm　⇄　源B <b>wttr.in 独立聚合</b>(观测 ${v.b.updated}): ${v.b.temp}°C ${v.b.desc} · 24h降水 ${v.b.precip24}mm　|　气温偏差 <b>${v.diff_temp}°C</b> · 降水判定${v.rain_om===v.rain_b?'一致':'不一致'} → ${v.ok?'✅ 双源交叉验证通过, 实时天气可信':'⚠️ 双源偏差较大, 建议以气象部门官方数据为准'} · ${v.ts}`;
+  }catch(e){el.textContent='⚠️ 验证请求失败, 请检查网络';}
+};
+
+/* ---------- 数据轮询 ---------- */
+async function pollCities(){
+  try{
+    const cs=await (await fetch('/api/cities')).json();
+    setConn(true);
+    allCities=cs;
+    updateSat(currentCity);
+    renderMap(cs);
+    $('nCities').textContent=cs.length;
+    $('nCams').textContent=cs.reduce((s,c)=>s+c.cams_online,0);
+    $('nHigh').textContent=cs.filter(c=>c.level>=3).length;
+    $('nWading').textContent=cs.filter(c=>c.persons_in_water>0).length;
+    const sel=$('citySel');
+    if(sel.options.length!==cs.length) sel.innerHTML=cs.map(c=>`<option>${c.name}</option>`).join('');
+    if(!cs.find(c=>c.name===currentCity)) selectCity(cs[0].name);
+  }catch(e){setConn(false);}
+}
+async function pollStatus(){
+  try{
+    const s=await (await fetch('/api/status?city='+encodeURIComponent(currentCity))).json();
+    setConn(true);
+    const m=s.metrics;
+    $('camName').textContent=`${s.city} · ${s.cam} 实时内涝检测`;
+    const st=$('srcTag');
+    if(s.source_kind==='file'){
+      st.textContent='📹 真实视频接入 · '+(s.source_file||'');
+      st.classList.remove('hidden');
+    }else st.classList.add('hidden');
+    $('fps').textContent=s.fps;
+    $('detector').textContent=s.detector==='ultralytics-yolo'?'YOLO':'OpenCV';
+    $('mRatio').textContent=(m.water_ratio*100).toFixed(1)+'%';
+    $('mLevel').textContent='L'+m.level+' '+m.name;$('mLevel').style.color=LEVEL_COLOR[m.level];
+    $('mPersons').textContent=m.persons_in_water;
+    $('mEvents').textContent=s.events_today;
+    const wx=$('wxChip');
+    if(s.weather&&s.weather.desc){
+      wx.textContent=`🌦 实时天气 ${s.weather.desc} ${s.weather.temp??'—'}°C · 雨强 ${s.weather.precip??0}mm/h · 24h ${s.weather.precip_24h??0}mm`;
+      wx.classList.remove('hidden');
+    }else wx.classList.add('hidden');
+    const b=$('riskBadge');b.textContent=`${s.city} L${m.level} ${m.name} · ${m.action}`;
+    b.style.background=LEVEL_COLOR[m.level];
+    hist.push(m.water_ratio);if(hist.length>120)hist.shift();drawTrend();
+    if(s.judgment.summary){
+      $('aiSummary').textContent=s.judgment.summary;
+      $('aiAdvice').textContent=s.judgment.advice;
+      $('aiSrc').textContent=s.judgment.source==='llm'?'大模型在线':'离线预案';
+    }
+  }catch(e){setConn(false);}
+}
+async function pollEvents(){
+  try{
+    const evs=await (await fetch('/api/events?city='+encodeURIComponent(currentCity))).json();
+    setConn(true);
+    $('eventList').innerHTML=evs.slice(0,12).map(e=>`
+      <li class="p-3 rounded-lg bg-slate-800/70 border-l-4" style="border-color:${LEVEL_COLOR[e.level]}">
+        <div class="flex justify-between text-xs text-slate-400"><span>${e.time}</span>
+        <span class="${e.status==='待处置'?'text-rose-400 badge':'text-emerald-400'}">${e.status}</span></div>
+        <p class="mt-1"><b class="text-slate-100">[${e.type}]</b> ${e.summary}</p>
+        ${e.status==='待处置'?`<button onclick="ack('${e.id}')" class="mt-2 text-xs px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500">受理处置</button>`:''}
+      </li>`).join('')||'<li class="text-slate-500 text-xs">该城市暂无事件</li>';
+  }catch(e){setConn(false);}
+}
+async function ack(id){await fetch(`/api/events/${id}/ack`,{method:'POST'});pollEvents();}
+
+/* ---------- 趋势图 ---------- */
+function drawTrend(){
+  const c=$('trend'),ctx=c.getContext('2d');
+  c.width=c.clientWidth*devicePixelRatio;c.height=90*devicePixelRatio;
+  ctx.scale(devicePixelRatio,devicePixelRatio);
+  ctx.clearRect(0,0,c.width,c.height);
+  if(hist.length<2)return;
+  const max=Math.max(0.35,...hist),W=c.clientWidth,H=90;
+  ctx.beginPath();ctx.strokeStyle='#818cf8';ctx.lineWidth=2;
+  hist.forEach((v,i)=>{const x=i/(hist.length-1)*W,y=H-8-(v/max)*(H-16);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+  ctx.stroke();
+  ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();
+  ctx.fillStyle='rgba(99,102,241,.18)';ctx.fill();
+}
+
+/* ---------- 启动 ----------
+   首轮请求推迟到 window load 之后并错峰发出: 若在"页面尚未加载完"时刷新,
+   浏览器会取消文档与在途请求并报 ERR_ABORTED(无法阻止); 错峰后此窗口内
+   最多只有 1 个请求在途, 加载完成后再刷新则完全无报错 */
+/* 视频帧轮询: 上一帧加载完成后再请求下一帧, 任意时刻至多一个在途帧请求,
+   页面刷新/切换时几乎不会出现被浏览器取消的请求(ERR_ABORTED) */
+let snapN=0,snapBusy=false,snapT=0;
+function snapLoop(){
+  if(!document.hidden&&(!snapBusy||performance.now()-snapT>1500)){
+    snapBusy=true;snapT=performance.now();
+    const img=$('feed');
+    img.onload=img.onerror=()=>{snapBusy=false;};
+    img.src=`/snapshot.jpg?city=${encodeURIComponent(currentCity)}&n=${snapN++}`;
+  }
+  setTimeout(snapLoop,120);
+}
+/* 轮询定时器: 页面切到后台时暂停(避免旧标签页在服务重启期间持续报错), 回到前台立即恢复 */
+let timers=[];
+function startPolls(){stopPolls();timers=[setInterval(pollStatus,2000),setInterval(pollEvents,5000),setInterval(pollCities,3000)];}
+function stopPolls(){timers.forEach(clearInterval);timers=[];}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden)stopPolls();
+  else{pollCities();setTimeout(pollStatus,300);setTimeout(pollEvents,600);startPolls();}
+});
+window.addEventListener('load',()=>{
+  initMap();initSatMap();setupSearch();
+  setTimeout(pollCities,100);          // 第 1 波: 城市列表
+  setTimeout(()=>selectCity('武汉'),450); // 第 2 波: 触发状态/事件查询
+  setTimeout(snapLoop,800);            // 第 3 波: 视频帧轮询
+  setTimeout(startPolls,1200);         // 第 4 波: 周期定时器
+});
+</script>
+</body>
+</html>
