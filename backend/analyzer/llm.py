@@ -20,8 +20,9 @@ MODEL = os.environ.get("LLM_MODEL", "qwen-vl-max")
 
 PROMPT = (
     "你是城市洪涝监测与公安应急处置专家。请分析这张监控画面与结构化指标, "
-    "输出 JSON: {\"summary\": 一句话事件描述, \"advice\": 3条公安应急处置建议(封控/疏散/排水/交通管制等)}。"
-    "指标: {metrics}"
+    "严格只输出一个 JSON 对象(不要其他文字): "
+    '{"summary": "一句话事件描述", "advice": "3条公安应急处置建议(封控/疏散/排水/交通管制等, 用分号分隔)"}。'
+    "指标: "
 )
 
 TEMPLATES = {
@@ -58,7 +59,7 @@ def _call_llm(frame: np.ndarray, metrics: dict) -> dict:
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "text", "text": PROMPT.format(metrics=json.dumps(metrics, ensure_ascii=False))},
+                {"type": "text", "text": PROMPT + json.dumps(metrics, ensure_ascii=False)},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ],
         }],
@@ -68,7 +69,7 @@ def _call_llm(frame: np.ndarray, metrics: dict) -> dict:
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=120) as resp:  # 本地 GPU 排队推理需较长时间
         data = json.load(resp)
     text = data["choices"][0]["message"]["content"]
     try:
