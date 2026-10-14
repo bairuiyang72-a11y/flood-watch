@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from .analyzer import llm, objects, risk, water
 from .cities import CITIES
 from .events import EventStore
-from .hotspots import HOTSPOTS
+from .hotspots import HOTSPOTS, province_brief
 from .video_source import SimulatedSource, FileOrCameraSource
 from .weather import WeatherService
 
@@ -37,6 +37,7 @@ class Analyzer:
 
     def __init__(self, city: dict, source):
         self.city = city["name"]
+        self.province = city.get("province", "")
         self.cam = city["cam"]
         self.source = source
         self.lock = threading.Lock()
@@ -85,7 +86,13 @@ class Analyzer:
                 self.last_alert_ts = now
                 ok, buf = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
                 snap = base64.b64encode(buf.tobytes()).decode() if ok else ""
-                judgment = llm.analyze(annotated, metrics)
+                # 研判输入: 实时指标 + 省内内涝易发区简介(区域背景, 供大模型参考)
+                j_metrics = dict(metrics)
+                j_metrics["省份"] = self.province
+                brief = province_brief(self.province)
+                if brief:
+                    j_metrics["省内内涝易发区背景"] = brief
+                judgment = llm.analyze(annotated, j_metrics)
                 store.add(self.city, self.cam, metrics, judgment, snap)
                 with self.lock:
                     self.judgment = judgment

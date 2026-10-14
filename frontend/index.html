@@ -275,9 +275,11 @@ function renderHotspots(){
     const t=HS_TYPE[h.type]||HS_TYPE.county;
     const mk=L.marker([h.lat,h.lng],{icon:L.divIcon({className:'',iconSize:[16,16],iconAnchor:[8,8],
       html:`<div class="${t.cls}"></div>`})}).addTo(hsLayer);
-    mk.bindPopup(`<b style="font-size:13px">${h.parent} · ${h.name}</b><br>`+
-      `<span style="color:${t.color}">${t.name}</span><br>`+
-      `<span style="color:#cbd5e1">${h.desc}</span>`);
+    mk.bindPopup(
+      `<b style="font-size:13px">${h.parent} · ${h.name}</b><br>`+
+      `标注类型: <span style="color:${t.color}">${t.name}</span><br>`+
+      `易涝简介: <span style="color:#cbd5e1">${h.desc}</span><br>`+
+      `<span style="color:#818cf8">已纳入 AI 应急研判的区域背景参考</span>`);
     mk.on('click',()=>{map.flyTo([h.lat,h.lng],t.zoom,{duration:1.0});});
     h._marker=mk;
   });

@@ -83,3 +83,10 @@ HOTSPOTS = [
      "lng": 108.53, "lat": 25.97,
      "desc": "“村超”所在地, 都柳江沿岸低洼带; 2025年6月洪水10分钟内淹没整片区域, 旅游村镇内涝典型场景。"},
 ]
+
+
+def province_brief(province: str) -> list:
+    """返回某省内涝易发区标注的简介列表(名称: 原简介), 供 AI 研判作区域背景。"""
+    if not province:
+        return []
+    return [f"{h['parent']}·{h['name']}: {h['desc']}" for h in HOTSPOTS if h.get("province") == province]
