@@ -42,10 +42,26 @@ class EventStore:
         return ev
 
     def ack(self, ev_id: str) -> bool:
+        """接受派发: 待处置/处置中 -> 处置中(已处置的事件不可回退)。"""
         with self._lock:
             for e in self._events:
                 if e["id"] == ev_id:
+                    if e["status"] == "已处置":
+                        return False
                     e["status"] = "处置中"
+                    self._save()
+                    return True
+        return False
+
+    def resolve(self, ev_id: str) -> bool:
+        """民警办结: 处置中 -> 已处置。"""
+        with self._lock:
+            for e in self._events:
+                if e["id"] == ev_id:
+                    if e["status"] != "处置中":
+                        return False
+                    e["status"] = "已处置"
+                    e["resolved_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     self._save()
                     return True
         return False

@@ -224,9 +224,25 @@ def _reattach_uploaded_videos():
             a.source = FileOrCameraSource(p)
             a.source_kind = "file"
             a.source_path = p
-            print(f"[startup] {city} 已重挂真实视频源: {os.path.basename(p)}")
+            print(f"[startup] {city} 已重挂真实视频源: {os.path.basename(p)}", flush=True)
         except Exception as e:
-            print(f"[startup] {city} 重挂真实视频失败, 保持模拟源: {e}")
+            print(f"[startup] {city} 重挂真实视频失败, 保持模拟源: {e}", flush=True)
+    # 未单独上传视频的城市统一分配最新的一个真实视频源, 保证全国监测与研判基于真实画面
+    if latest:
+        shared = max(latest.values())[1]
+        n = 0
+        for name, a in analyzers.items():
+            if a.source_kind != "sim":
+                continue
+            try:
+                a.source = FileOrCameraSource(shared)
+                a.source_kind = "file"
+                a.source_path = shared
+                n += 1
+            except Exception:
+                pass
+        if n:
+            print(f"[startup] {n} 个无专属视频的城市已共用真实视频源: {os.path.basename(shared)}", flush=True)
 
 
 def _pick(city: str | None) -> Analyzer:
@@ -371,6 +387,12 @@ def api_videos():
 @app.post("/api/events/{ev_id}/ack")
 def api_ack(ev_id: str):
     ok = store.ack(ev_id)
+    return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+
+
+@app.post("/api/events/{ev_id}/resolve")
+def api_resolve(ev_id: str):
+    ok = store.resolve(ev_id)
     return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
 

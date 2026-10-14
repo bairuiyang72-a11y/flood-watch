@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>民警终端 · 事件处置</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body{font-family:"Microsoft YaHei",system-ui,sans-serif;background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 55%,#312e81 100%);min-height:100vh;color:#e2e8f0}
+  .card{background:rgba(30,41,59,.72);border:1px solid rgba(129,140,248,.25);border-radius:1rem;box-shadow:0 8px 28px rgba(2,6,23,.5);backdrop-filter:blur(6px)}
+  .glow{background:linear-gradient(90deg,#4f46e5,#a78bfa,#7c3aed);-webkit-background-clip:text;background-clip:text;color:transparent}
+  select{background:#1e293b;border:1px solid rgba(129,140,248,.4);border-radius:.5rem;padding:.3rem .6rem;color:#e2e8f0;font-size:.85rem}
+  ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#4f46e5;border-radius:3px}
+</style>
+</head>
+<body class="p-4 md:p-6 max-w-4xl mx-auto">
+  <header class="flex flex-wrap items-center justify-between gap-3 mb-4">
+    <div>
+      <h1 class="text-xl md:text-2xl font-bold glow">👮 民警终端 · 内涝告警事件处置</h1>
+      <p class="text-xs text-slate-400 mt-1">接收指挥端派发事件 · 接受派发后转入处置中 · 现场处置完毕标记已处置</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <select id="statusSel" onchange="load()">
+        <option value="">全部状态</option>
+        <option value="待处置">待处置</option>
+        <option value="处置中">处置中</option>
+        <option value="已处置">已处置</option>
+      </select>
+      <select id="citySel" onchange="load()"><option value="">全部城市</option></select>
+      <span id="clock" class="text-sm text-indigo-300 font-mono"></span>
+    </div>
+  </header>
+
+  <div class="grid grid-cols-3 gap-3 mb-4">
+    <div class="card p-3 text-center"><p class="text-xs text-slate-400">待处置</p><p class="text-xl font-bold text-rose-300" id="nPending">0</p></div>
+    <div class="card p-3 text-center"><p class="text-xs text-slate-400">处置中</p><p class="text-xl font-bold text-orange-300" id="nDoing">0</p></div>
+    <div class="card p-3 text-center"><p class="text-xs text-slate-400">已处置</p><p class="text-xl font-bold text-emerald-300" id="nDone">0</p></div>
+  </div>
+
+  <ul id="list" class="space-y-3 text-sm"></ul>
+  <p id="empty" class="hidden text-center text-slate-500 text-sm py-10">暂无派发事件</p>
+
+<script>
+const LV = {1:['L1 低风险','#22c55e'],2:['L2 较低风险','#eab308'],3:['L3 中风险','#f97316'],4:['L4 高风险','#ef4444']};
+const ST = {'待处置':'bg-rose-500/20 text-rose-300 border-rose-500/40','处置中':'bg-orange-500/20 text-orange-300 border-orange-500/40','已处置':'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'};
+
+setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString('zh-CN');},1000);
+
+async function load(){
+  const p=new URLSearchParams();
+  if(citySel.value)p.set('city',citySel.value);
+  if(statusSel.value)p.set('status',statusSel.value);
+  const evs=await (await fetch('/api/events?'+p)).json();
+  const all=citySel.value?evs:evs; // 统计用当前列表
+  let allEvs=evs;
+  if(citySel.value||statusSel.value){ // 需要全量统计时再拉一次
+    allEvs=await (await fetch('/api/events'+(citySel.value?'?city='+encodeURIComponent(citySel.value):''))).json();
+  }
+  const cnt=s=>allEvs.filter(e=>e.status===s).length;
+  nPending.textContent=cnt('待处置');nDoing.textContent=cnt('处置中');nDone.textContent=cnt('已处置');
+  if(!citySel.options.length||citySel.options.length===1){
+    const cities=[...new Set(allEvs.map(e=>e.city))];
+    // 城市下拉仅初始化一次, 用全量事件
+    fetch('/api/events').then(r=>r.json()).then(es=>{
+      const cs=[...new Set(es.map(e=>e.city))].sort();
+      if(citySel.options.length===1) cs.forEach(c=>citySel.add(new Option(c,c)));
+    });
+  }
+  render(evs);
+}
+
+function render(evs){
+  empty.classList.toggle('hidden',evs.length>0);
+  list.innerHTML=evs.map(e=>{
+    const [ln,lc]=LV[e.level]||['',''];
+    const canAck=e.status!=='已处置';
+    const canDone=e.status==='处置中';
+    return `<li class="card p-4">
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <span class="px-2 py-0.5 rounded text-xs font-bold text-white" style="background:${lc}">${ln}</span>
+        <b class="text-indigo-200">${e.city} · ${e.cam}</b>
+        <span class="text-xs text-slate-400">${e.time}</span>
+        <span class="ml-auto text-xs px-2.5 py-1 rounded-full border ${ST[e.status]||''}">${e.status}</span>
+      </div>
+      <p class="text-xs text-slate-400 mb-1">类型: ${e.type}${e.ai_source==='llm'?' · AI在线研判':''}</p>
+      <p class="leading-6 text-slate-200">${e.summary}</p>
+      <p class="leading-6 text-slate-400 text-xs mt-1">处置建议: ${e.advice}</p>
+      ${e.resolved_time?`<p class="text-xs text-emerald-400 mt-1">办结时间: ${e.resolved_time}</p>`:''}
+      <div class="flex gap-2 mt-3">
+        ${canAck?`<button onclick="act('${e.id}','ack')" class="px-3 py-1.5 rounded-lg text-xs bg-indigo-600/70 hover:bg-indigo-500 border border-indigo-400/40">📥 接受派发</button>`:''}
+        ${canDone?`<button onclick="act('${e.id}','resolve')" class="px-3 py-1.5 rounded-lg text-xs bg-emerald-600/70 hover:bg-emerald-500 border border-emerald-400/40">✅ 标记已处置</button>`:''}
+      </div>
+    </li>`;
+  }).join('');
+}
+
+async function act(id,op){
+  const r=await fetch(`/api/events/${id}/${op}`,{method:'POST'});
+  if(!r.ok)alert('操作失败: 事件状态已变化, 请刷新');
+  load();
+}
+
+load();
+setInterval(load,5000);
+</script>
+</body>
+</html>
