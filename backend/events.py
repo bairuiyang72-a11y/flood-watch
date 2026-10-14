@@ -6,7 +6,10 @@ import threading
 import time
 import uuid
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "events.json")
+from .paths import FROZEN, DATA_DIR
+
+# 源码运行: backend/events.json(与原有行为一致); exe 冻结运行: exe 同级目录(临时解压目录会丢数据)
+DATA_FILE = os.path.join(DATA_DIR if FROZEN else os.path.dirname(__file__), "events.json")
 
 
 class EventStore:

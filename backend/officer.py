@@ -10,8 +10,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from .app import store
-
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+from .paths import FRONTEND_DIR
 
 officer_app = FastAPI(title="Flood-Watch 民警终端")
 

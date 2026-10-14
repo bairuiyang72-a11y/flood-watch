@@ -21,6 +21,7 @@ if __name__ == "__main__":
 
     os.environ["FLOOD_SOURCE"] = args.source
     import uvicorn
+    from backend.app import app
     from backend.officer import officer_app
 
     def serve_officer():
@@ -28,4 +29,5 @@ if __name__ == "__main__":
 
     threading.Thread(target=serve_officer, daemon=True).start()
     print(f"[run] 指挥端 http://{args.host}:{args.port} | 民警终端 http://{args.host}:{officer_port}")
-    uvicorn.run("backend.app:app", host=args.host, port=args.port)
+    # 直接传 app 对象(而非 "backend.app:app" 导入字符串): exe 冻结环境下模块字符串导入不可靠
+    uvicorn.run(app, host=args.host, port=args.port)

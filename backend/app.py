@@ -19,11 +19,10 @@ from .analyzer import depth, llm, objects, risk, water
 from .cities import CITIES
 from .events import EventStore
 from .hotspots import HOTSPOTS, province_brief
+from .paths import FRONTEND_DIR, TILE_CACHE_DIR, UPLOAD_DIR
 from .video_source import SimulatedSource, FileOrCameraSource
 from .weather import WeatherService
 
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm"}
 
 app = FastAPI(title="Flood-Watch 城市洪涝监测与公安应急处置平台")
@@ -478,7 +477,6 @@ TILE_LAYERS = {
     "img": "https://webst0{sub}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}",
     "label": "https://webst0{sub}.is.autonavi.com/appmaptile?style=8&lang=zh_cn&x={x}&y={y}&z={z}",
 }
-TILE_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".tilecache")
 
 
 @app.get("/tiles/{kind}/{z}/{x}/{y}")
