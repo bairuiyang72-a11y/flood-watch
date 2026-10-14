@@ -280,7 +280,8 @@ function renderHotspots(){
       `标注类型: <span style="color:${t.color}">${t.name}</span><br>`+
       `易涝简介: <span style="color:#cbd5e1">${h.desc}</span><br>`+
       `<span style="color:#818cf8">已纳入 AI 应急研判的区域背景参考</span>`);
-    mk.on('click',()=>{map.flyTo([h.lat,h.lng],t.zoom,{duration:1.0});});
+    mk.on('click',()=>{map.flyTo([h.lat,h.lng],t.zoom,{duration:1.0});
+      if(h.type==='county'||h.type==='village')showHotspotSat(h);});
     h._marker=mk;
   });
 }
@@ -317,6 +318,7 @@ function setupSearch(){
         box.value=x.h.name;
         map.flyTo([x.h.lat,x.h.lng],t.zoom,{duration:1.2});
         x.h._marker&&x.h._marker.openPopup();
+        if(x.h.type==='county'||x.h.type==='village')showHotspotSat(x.h);
       }
     });
   });
@@ -329,18 +331,23 @@ function setupSearch(){
 function selectCity(name){
   // 同一城市重复选择时不重设资源, 避免无谓请求被取消
   if(name===currentCity&&$('feed').dataset.loaded===name)return;
-  currentCity=name;hist=[];
+  currentCity=name;hist=[];satPinned=false;
   $('citySel').value=name;
   $('feed').dataset.loaded=name;
   $('mask').src=`/mask.png?city=${encodeURIComponent(name)}`;
   $('evCityTag').textContent='· '+name;
   $('wxVerify').classList.add('hidden');
   updateSat(name);
-  pollStatus(); pollEvents();
+  pollStatus(); pollEvents(); requestJudge(name);
+}
+
+/* 打开网页/切换城市即自动触发在线 AI 研判(后端 60s 去重, 异步推理经轮询呈现) */
+function requestJudge(name){
+  fetch('/api/judge?city='+encodeURIComponent(name),{method:'POST'}).catch(()=>{});
 }
 
 /* ---------- 卫星街景定位: 高德卫星影像 z16 显示检测站真实街道 ---------- */
-let satMap=null,satMarker=null;
+let satMap=null,satMarker=null,satPinned=false;
 function initSatMap(){
   satMap=L.map('satMap',{zoomControl:true,attributionControl:false,dragging:true,maxZoom:16}).setView([30.59,114.31],16);
   L.tileLayer('/tiles/img/{z}/{x}/{y}',TILE_OPT).addTo(satMap);
@@ -351,9 +358,19 @@ function initSatMap(){
 function updateSat(name){
   const c=allCities.find(x=>x.name===name);
   if(!c||!satMap)return;
+  if(satPinned)return;   // 已固定查看易发区标注真实位置时, 轮询不抢回视角
   satMap.setView([c.lat,c.lng],16);
   satMarker.setLatLng([c.lat,c.lng]);
   $('satTip').textContent=`· ${c.province||''}${c.name} ${c.cam} (${c.lng.toFixed(2)}°E, ${c.lat.toFixed(2)}°N)`;
+}
+/* 县域/村镇标注点击后: 卫星面板定位其真实街道, 直到切换监测城市 */
+function showHotspotSat(h){
+  if(!satMap)return;
+  satPinned=true;
+  satMap.setView([h.lat,h.lng],16);
+  satMarker.setLatLng([h.lat,h.lng]);
+  const t=HS_TYPE[h.type]||HS_TYPE.county;
+  $('satTip').textContent=`· ${h.parent} ${h.name} (${h.lng.toFixed(2)}°E, ${h.lat.toFixed(2)}°N) · ${t.name}`;
 }
 
 /* ---------- 天气验真: 双独立气象源交叉核对 ---------- */
@@ -397,6 +414,7 @@ async function loadBootstrap(){
     hotspots=d.hotspots; renderHotspots();
     applyStatus(d.status);
     applyEvents(d.events);
+    requestJudge(currentCity);
   }catch(e){setConn(false);}
 }
 async function pollStatus(){

@@ -10,6 +10,7 @@ import time
 import urllib.request
 
 import cv2
+import numpy as np
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +47,8 @@ class Analyzer:
         self.metrics = {"level": 1, "name": "低风险", "color": "#22c55e", "action": "常规监测",
                         "water_ratio": 0.0, "growth": 0.0, "persons_in_water": 0, "cars_in_water": 0}
         self.judgment = {"summary": "", "advice": "", "source": "template"}
+        self.judgment_ts = 0.0
+        self._judging = False
         self.risk_engine = risk.RiskEngine()
         self.last_alert_level = 0
         self.last_alert_ts = 0.0
@@ -86,16 +89,11 @@ class Analyzer:
                 self.last_alert_ts = now
                 ok, buf = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
                 snap = base64.b64encode(buf.tobytes()).decode() if ok else ""
-                # 研判输入: 实时指标 + 省内内涝易发区简介(区域背景, 供大模型参考)
-                j_metrics = dict(metrics)
-                j_metrics["省份"] = self.province
-                brief = province_brief(self.province)
-                if brief:
-                    j_metrics["省内内涝易发区背景"] = brief
-                judgment = llm.analyze(annotated, j_metrics)
+                judgment = self._judge_with(annotated, metrics)
                 store.add(self.city, self.cam, metrics, judgment, snap)
                 with self.lock:
                     self.judgment = judgment
+                    self.judgment_ts = time.time()
 
             ok, buf = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
             _, png = cv2.imencode(".png", mask)
@@ -127,6 +125,40 @@ class Analyzer:
     def snapshot(self):
         with self.lock:
             return (self.annotated, self.mask_png, dict(self.metrics), dict(self.judgment))
+
+    def _judge_with(self, annotated, metrics):
+        """研判输入: 实时指标 + 省内内涝易发区简介(区域背景, 供大模型参考)。"""
+        j_metrics = dict(metrics)
+        j_metrics["省份"] = self.province
+        brief = province_brief(self.province)
+        if brief:
+            j_metrics["省内内涝易发区背景"] = brief
+        return llm.analyze(annotated, j_metrics)
+
+    def judge_now(self):
+        """按需触发在线研判(打开网页/切换城市即自动研判, 不必等 L3 告警)。
+        60s 内已有结果或正在推理时跳过, 避免刷新页面反复调用大模型。"""
+        with self.lock:
+            ann, met = self.annotated, dict(self.metrics)
+            fresh = time.time() - self.judgment_ts < 60
+            busy = self._judging
+        if ann is None or fresh or busy:
+            return
+        self._judging = True
+
+        def _run():
+            try:
+                img = cv2.imdecode(np.frombuffer(ann, np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    return
+                judgment = self._judge_with(img, met)
+                with self.lock:
+                    self.judgment = judgment
+                    self.judgment_ts = time.time()
+            finally:
+                self._judging = False
+
+        threading.Thread(target=_run, daemon=True).start()
 
 
 analyzers: dict[str, Analyzer] = {}
@@ -164,8 +196,37 @@ def _startup():
         a = Analyzer(c, source)
         if real_src != "sim" and i == 0:
             a.source_kind = "file"
-        a.start()
         analyzers[c["name"]] = a
+    _reattach_uploaded_videos()
+    for a in analyzers.values():
+        a.start()
+
+
+def _reattach_uploaded_videos():
+    """服务重启后自动重挂已上传的真实监控视频(uploads/{城市}_{文件名}),
+    保证 AI 研判与画面监测基于真实视频而非模拟动画; 同城市多文件取最新。"""
+    if not os.path.isdir(UPLOAD_DIR):
+        return
+    latest: dict[str, tuple] = {}   # city -> (mtime, path)
+    for n in os.listdir(UPLOAD_DIR):
+        p = os.path.join(UPLOAD_DIR, n)
+        if not (os.path.isfile(p) and os.path.splitext(n)[1].lower() in VIDEO_EXTS and "_" in n):
+            continue
+        city = n.split("_", 1)[0]
+        mt = os.stat(p).st_mtime
+        if city not in latest or mt > latest[city][0]:
+            latest[city] = (mt, p)
+    for city, (_, p) in latest.items():
+        a = analyzers.get(city)
+        if a is None or a.source_kind == "file":   # FLOOD_SOURCE 显式指定的真实源不覆盖
+            continue
+        try:
+            a.source = FileOrCameraSource(p)
+            a.source_kind = "file"
+            a.source_path = p
+            print(f"[startup] {city} 已重挂真实视频源: {os.path.basename(p)}")
+        except Exception as e:
+            print(f"[startup] {city} 重挂真实视频失败, 保持模拟源: {e}")
 
 
 def _pick(city: str | None) -> Analyzer:
@@ -218,6 +279,13 @@ def api_status(city: str | None = Query(None)):
         "source_kind": a.source_kind,
         "source_file": os.path.basename(a.source_path or ""),
     }
+
+
+@app.post("/api/judge")
+def api_judge(city: str = Query("")):
+    """打开网页/切换城市时触发一次在线 AI 研判(异步推理, 立即返回, 结果经 /api/status 轮询呈现)。"""
+    _pick(city or None).judge_now()
+    return {"ok": True}
 
 
 @app.get("/api/events")

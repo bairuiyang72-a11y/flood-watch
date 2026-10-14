@@ -9,6 +9,11 @@
 import base64
 import json
 import os
+import shutil
+import subprocess
+import threading
+import time
+import urllib.error
 import urllib.request
 
 import cv2
@@ -49,6 +54,21 @@ def analyze(frame: np.ndarray, metrics: dict) -> dict:
     }
 
 
+_CALL_LOCK = threading.Lock()  # 串行化推理: 小模型并发请求易触发异常
+
+
+def _unload_model():
+    """调用 ollama stop 卸载模型: 用于从 Ollama 防重复看门狗的异常状态中自愈。"""
+    exe = shutil.which("ollama") or os.path.join(
+        os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", "ollama.exe")
+    if not os.path.exists(exe):
+        return
+    try:
+        subprocess.run([exe, "stop", MODEL], capture_output=True, timeout=30)
+    except Exception:
+        pass
+
+
 def _call_llm(frame: np.ndarray, metrics: dict) -> dict:
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
     if not ok:
@@ -70,8 +90,20 @@ def _call_llm(frame: np.ndarray, metrics: dict) -> dict:
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"},
     )
-    with urllib.request.urlopen(req, timeout=120) as resp:  # 本地 GPU 排队推理需较长时间
-        data = json.load(resp)
+    with _CALL_LOCK:
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:  # 本地 GPU 排队推理需较长时间
+                    data = json.load(resp)
+                break
+            except urllib.error.HTTPError as e:
+                # Ollama 防重复看门狗误杀后模型会持续 500, 自动卸载重载后重试一次
+                if attempt == 1 and e.code == 500:
+                    print("[llm] 推理服务异常(500), 自动重载模型重试…")
+                    _unload_model()
+                    time.sleep(2)
+                    continue
+                raise
     text = data["choices"][0]["message"]["content"]
     try:
         parsed = json.loads(text[text.index("{"): text.rindex("}") + 1])
