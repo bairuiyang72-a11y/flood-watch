@@ -15,7 +15,7 @@ from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .analyzer import llm, objects, risk, water
+from .analyzer import depth, llm, objects, risk, water
 from .cities import CITIES
 from .events import EventStore
 from .hotspots import HOTSPOTS, province_brief
@@ -45,7 +45,8 @@ class Analyzer:
         self.annotated = None
         self.mask_png = None
         self.metrics = {"level": 1, "name": "低风险", "color": "#22c55e", "action": "常规监测",
-                        "water_ratio": 0.0, "growth": 0.0, "persons_in_water": 0, "cars_in_water": 0}
+                        "water_ratio": 0.0, "growth": 0.0, "persons_in_water": 0, "cars_in_water": 0,
+                        "depth_cm": 0, "depth_refs": 0}
         self.judgment = {"summary": "", "advice": "", "source": "template"}
         self.judgment_ts = 0.0
         self._judging = False
@@ -75,7 +76,10 @@ class Analyzer:
             mask, ratio, _ = segmenter.segment(frame)
             objs = detector.detect(frame)
             w_hits = objects.person_in_water(objs, mask)
-            metrics = self.risk_engine.assess(ratio, len(w_hits), 0)
+            # 方案1移植: 参照物(车辆/行人)浸没比例 x 标准高度 -> 厘米级水深估计
+            dep = depth.estimate(objs, mask)
+            metrics = self.risk_engine.assess(ratio, len(w_hits), 0,
+                                              dep["max_cm"], dep["refs"])
             annotated = self._draw(frame, mask, objs, w_hits, metrics)
             now = time.time()
             self.fps = 0.9 * self.fps + 0.1 * (1.0 / max(now - prev, 1e-3))
@@ -117,6 +121,8 @@ class Analyzer:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         bar = (f"{self.cam.split()[0]} | RISK L{metrics['level']}  "
                f"WATER {metrics['water_ratio']*100:.1f}%  PERSON {metrics['persons_in_water']}")
+        if metrics.get("depth_cm"):
+            bar += f"  DEPTH {metrics['depth_cm']}cm"
         cv2.rectangle(out, (0, 36), (640, 66), (0, 0, 0), -1)
         cv2.putText(out, bar, (8, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
                     tuple(int(metrics["color"][i:i+2], 16) for i in (1, 3, 5)), 2)
@@ -307,6 +313,48 @@ def api_judge(city: str = Query("")):
 @app.get("/api/events")
 def api_events(city: str | None = Query(None)):
     return store.list(city)
+
+
+# ---------------- 社情上报多模态情报接口(方案3 MIST-SMMD 移植) ----------------
+def _match_city(text: str) -> str | None:
+    """粗定位: 文本模糊匹配 31 城城市名/省名(论文中的地理编码环节轻量替代)。"""
+    for c in CITIES:
+        if c["name"] in text or (c.get("province", "") and c["province"] in text):
+            return c["name"]
+    return None
+
+
+@app.post("/api/report")
+def api_report(text: str = Form(...), city: str = Form(""), image_b64: str = Form("")):
+    """公众/一线社情文本(可附现场图) -> LLM 时空信息提取 -> 反向过滤 -> 粗定位
+    -> 同日同城去重 -> 生成"舆情情报"事件进入指挥端/民警端事件流。"""
+    text = text.strip()
+    if not text:
+        return JSONResponse({"ok": False, "error": "上报内容为空"}, status_code=400)
+    info = llm.extract_report(text, image_b64.strip() or None)
+    if not info["is_flood"]:                      # 反向关键词/模型过滤非灾情噪声
+        return {"ok": True, "accepted": False, "reason": "与洪涝内涝无关, 已过滤",
+                "extract": info}
+    target = city if city in analyzers else _match_city(text + " " + info.get("place", ""))
+    if not target:
+        return {"ok": True, "accepted": False, "reason": "未能定位到监测城市, 请重新选择城市后上报",
+                "extract": info}
+    if store.has_similar(target, info["summary"]):  # 同日同城相似去重
+        return {"ok": True, "accepted": False, "reason": "同日同城已有相似上报, 已去重",
+                "extract": info}
+    level = {"重": 4, "中": 3}.get(info.get("severity", "中"), 2)
+    name, color, action = risk.LEVELS[level]
+    metrics = {"level": level, "name": name, "color": color, "action": action,
+               "water_ratio": 0.0, "growth": 0.0, "persons_in_water": 0,
+               "cars_in_water": 0, "depth_cm": 0, "depth_refs": 0}
+    detail = " · ".join(x for x in (info.get("time", ""), info.get("place", "")) if x)
+    judgment = {"summary": f"[舆情] {info['summary']}" + (f"（{detail}）" if detail else ""),
+                "advice": llm.TEMPLATES[level],
+                "source": "llm-report" if info["source"] == "llm" else "rule-report"}
+    ev = store.add(target, "社情上报", metrics, judgment, "", origin="社情上报")
+    return {"ok": True, "accepted": True, "extract": info,
+            "event": {"id": ev["id"], "city": target, "level": level,
+                      "summary": ev["summary"]}}
 
 
 @app.get("/api/weather/verify")

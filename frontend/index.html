@@ -121,6 +121,7 @@
         </div>
         <div class="flex gap-2 text-xs">
           <button id="btnUpload" class="px-3 py-1 rounded-lg bg-amber-600/70 hover:bg-amber-500 border border-amber-500/40 text-amber-50">📤 上传监控视频</button>
+          <button id="btnReport" class="px-3 py-1 rounded-lg bg-rose-600/70 hover:bg-rose-500 border border-rose-500/40 text-rose-50">📣 社情上报</button>
           <button id="btnSim" class="px-3 py-1 rounded-lg bg-slate-700/70 hover:bg-slate-600 border border-slate-500/40 text-slate-200">恢复模拟画面</button>
           <input type="file" id="fileInput" accept="video/*,.mkv,.flv" class="hidden">
           <button id="btnMask" class="px-3 py-1 rounded-lg bg-indigo-600/60 hover:bg-indigo-500">积水掩码</button>
@@ -137,9 +138,10 @@
           <span class="absolute top-2 left-1/2 -translate-x-1/2 text-[11px] px-2 py-0.5 rounded bg-black/55 text-emerald-300 border border-emerald-500/40 badge">● LIVE · AI 实时分析中</span>
         </div>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4">
         <div class="card p-3 text-center"><p class="text-xs text-slate-400">积水面积占比</p><p class="text-2xl font-bold text-sky-300" id="mRatio">0%</p></div>
         <div class="card p-3 text-center"><p class="text-xs text-slate-400">风险等级</p><p class="text-2xl font-bold" id="mLevel">L1</p></div>
+        <div class="card p-3 text-center"><p class="text-xs text-slate-400">估算水深</p><p class="text-2xl font-bold text-amber-300" id="mDepth">—</p></div>
         <div class="card p-3 text-center"><p class="text-xs text-slate-400">涉水人员</p><p class="text-2xl font-bold text-rose-300" id="mPersons">0</p></div>
         <div class="card p-3 text-center"><p class="text-xs text-slate-400">今日事件</p><p class="text-2xl font-bold text-violet-300" id="mEvents">0</p></div>
       </div>
@@ -152,6 +154,20 @@
       </div>
     </section>
   </main>
+
+  <!-- 社情上报弹窗: 多模态时空信息提取(方案3 MIST-SMMD 移植) -->
+  <div id="reportModal" class="hidden fixed inset-0 z-[1200] bg-black/60 flex items-center justify-center p-4">
+    <div class="card w-full max-w-md p-4">
+      <h3 class="font-semibold text-rose-200 mb-1">📣 社情上报 · 多模态情报提取</h3>
+      <p class="text-xs text-slate-400 mb-2">录入社交媒体/现场上报的内涝信息, AI 自动提取"时间-地点-程度"并生成情报事件（当前城市: <span id="rpCity" class="text-rose-300"></span>）</p>
+      <textarea id="rpText" rows="4" class="w-full rounded-lg bg-slate-800/80 border border-rose-500/35 px-3 py-2 text-sm text-slate-100 outline-none focus:border-rose-400" placeholder="例: 今天下午15:30, 武昌区雄楚大道积水严重, 水深没过膝盖, 有车辆抛锚被困"></textarea>
+      <p id="rpResult" class="mt-2 text-xs leading-5 text-slate-300 hidden"></p>
+      <div class="mt-3 flex justify-end gap-2">
+        <button id="rpCancel" class="px-3 py-1 rounded-lg bg-slate-700/70 hover:bg-slate-600 text-xs text-slate-200">取消</button>
+        <button id="rpSubmit" class="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs text-white">提交上报</button>
+      </div>
+    </div>
+  </div>
 
 <script>
 const $=id=>document.getElementById(id);
@@ -436,6 +452,7 @@ function applyStatus(s){
     $('detector').textContent=s.detector==='ultralytics-yolo'?'YOLO':'OpenCV';
     $('mRatio').textContent=(m.water_ratio*100).toFixed(1)+'%';
     $('mLevel').textContent='L'+m.level+' '+m.name;$('mLevel').style.color=LEVEL_COLOR[m.level];
+    $('mDepth').textContent=m.depth_cm>0?m.depth_cm+'cm':'—';
     $('mPersons').textContent=m.persons_in_water;
     $('mEvents').textContent=s.events_today;
     const wx=$('wxChip');
@@ -464,11 +481,36 @@ function applyEvents(evs){
       <li class="p-3 rounded-lg bg-slate-800/70 border-l-4" style="border-color:${LEVEL_COLOR[e.level]}">
         <div class="flex justify-between text-xs text-slate-400"><span>${e.time}</span>
         <span class="${e.status==='待处置'?'text-rose-400 badge':'text-emerald-400'}">${e.status}</span></div>
-        <p class="mt-1"><b class="text-slate-100">[${e.type}]</b> ${e.summary}</p>
+        <p class="mt-1">${e.origin==='社情上报'?'<span class="text-[10px] px-1.5 py-0.5 mr-1 rounded bg-rose-700/70 text-rose-100 align-middle">舆情</span>':''}<b class="text-slate-100">[${e.type}]</b> ${e.summary}</p>
         ${e.status==='待处置'?`<button onclick="ack('${e.id}')" class="mt-2 text-xs px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500">受理处置</button>`:''}
       </li>`).join('')||'<li class="text-slate-500 text-xs">该城市暂无事件</li>';
 }
 async function ack(id){await fetch(`/api/events/${id}/ack`,{method:'POST'});pollEvents();}
+
+/* ---------- 社情上报: LLM 时空信息提取生成舆情情报事件(方案3移植) ---------- */
+$('btnReport').onclick=()=>{
+  $('rpCity').textContent=currentCity;
+  $('rpResult').classList.add('hidden');
+  $('reportModal').classList.remove('hidden');
+  $('rpText').focus();
+};
+$('rpCancel').onclick=()=>$('reportModal').classList.add('hidden');
+$('rpSubmit').onclick=async()=>{
+  const t=$('rpText').value.trim(),el=$('rpResult');
+  if(!t){el.textContent='请填写上报内容';el.classList.remove('hidden');return;}
+  $('rpSubmit').disabled=true;$('rpSubmit').textContent='AI 提取中…';
+  el.classList.remove('hidden');el.textContent='正在调用大模型提取时间-地点-程度(本地推理约需数十秒)…';
+  try{
+    const fd=new FormData();fd.append('city',currentCity);fd.append('text',t);
+    const r=await (await fetch('/api/report',{method:'POST',body:fd})).json();
+    if(r.accepted){
+      const e=r.extract;
+      el.innerHTML=`✅ 已生成情报事件(L${r.event.level}) · 时间: ${e.time||'未明'} · 地点: ${e.place||'—'} · 程度: ${e.severity}<br>${r.event.summary}`;
+      pollEvents();
+    }else el.textContent='⚠️ '+(r.reason||r.error||'上报未受理');
+  }catch(err){el.textContent='⚠️ 上报请求失败';}
+  $('rpSubmit').disabled=false;$('rpSubmit').textContent='提交上报';
+};
 
 /* ---------- 趋势图 ---------- */
 function drawTrend(){

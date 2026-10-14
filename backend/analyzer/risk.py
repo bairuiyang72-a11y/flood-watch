@@ -13,7 +13,8 @@ class RiskEngine:
     def __init__(self):
         self._history = []  # 最近积水占比, 用于估计上涨速率
 
-    def assess(self, water_ratio: float, persons_in_water: int, cars_in_water: int) -> dict:
+    def assess(self, water_ratio: float, persons_in_water: int, cars_in_water: int,
+               depth_cm: int = 0, depth_refs: int = 0) -> dict:
         self._history.append(water_ratio)
         if len(self._history) > 30:
             self._history.pop(0)
@@ -29,6 +30,9 @@ class RiskEngine:
         if growth > 0.002: score += 1
         if persons_in_water > 0: score += 2
         if cars_in_water > 0: score += 1
+        # 单目参照物水深估计(方案1移植): 30cm 起威胁行人, 50cm 起威胁车辆熄火
+        if depth_cm >= 30: score += 1
+        if depth_cm >= 50: score += 1
         level = max(1, min(4, 1 + score // 2)) if score else 1
         if persons_in_water > 0:
             level = max(level, 4)
@@ -40,4 +44,6 @@ class RiskEngine:
             "growth": round(growth, 5),
             "persons_in_water": persons_in_water,
             "cars_in_water": cars_in_water,
+            "depth_cm": int(depth_cm),
+            "depth_refs": int(depth_refs),
         }

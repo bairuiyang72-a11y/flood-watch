@@ -20,7 +20,8 @@ class EventStore:
             except Exception:
                 self._events = []
 
-    def add(self, city: str, cam: str, metrics: dict, judgment: dict, snapshot_b64: str = ""):
+    def add(self, city: str, cam: str, metrics: dict, judgment: dict,
+            snapshot_b64: str = "", origin: str = "视频监测"):
         ev = {
             "id": uuid.uuid4().hex[:8],
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -28,10 +29,12 @@ class EventStore:
             "cam": cam,
             "level": metrics["level"],
             "level_name": metrics["name"],
-            "type": "人员涉水" if metrics["persons_in_water"] else "路面积水",
+            "type": "舆情情报" if origin != "视频监测" else
+                    ("人员涉水" if metrics["persons_in_water"] else "路面积水"),
             "summary": judgment["summary"],
             "advice": judgment["advice"],
             "ai_source": judgment["source"],
+            "origin": origin,
             "status": "待处置",
             "snapshot": snapshot_b64,
         }
@@ -63,6 +66,19 @@ class EventStore:
                     e["status"] = "已处置"
                     e["resolved_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     self._save()
+                    return True
+        return False
+
+    def has_similar(self, city: str, text: str) -> bool:
+        """同日同城相似上报去重(方案3移植: 字段契约 + 同日去重)。"""
+        today = time.strftime("%Y-%m-%d")
+        key = text.strip()[:20]
+        if not key:
+            return False
+        with self._lock:
+            for e in self._events:
+                if (e.get("city") == city and e["time"].startswith(today)
+                        and key in e.get("summary", "")):
                     return True
         return False
 
