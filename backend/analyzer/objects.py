@@ -60,6 +60,9 @@ class ObjectDetector:
             area = bw * bh
             if area < 300 or y + bh < h * 0.3:
                 continue
+            # 排除录屏 UI 区域: 左侧 App 边栏与底部字幕/按钮条(非真实场景目标)
+            if x + bw < int(w * 0.13) or y > int(h * 0.86):
+                continue
             ar = bh / max(bw, 1)
             if 1.3 <= ar <= 3.5 and 300 <= area <= 0.02 * w * h:
                 out.append({"cls": "person", "conf": 0.6, "box": [x, y, x + bw, y + bh]})

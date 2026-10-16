@@ -34,56 +34,88 @@ class WaterSegmenter:
         return self._segment_opencv(frame)
 
     # ---------- OpenCV 轻量实现(默认, 离线可跑) ----------
-    # 互补三分支自适应融合(移植自 Prithvi-CAFE, M2FAF 思想的轻量近似):
-    #   分支1 颜色: 蓝色调 HSV 主导(判别力强, 作主分支固定先验)
-    #   分支2 纹理: 局部梯度低 -> 水面镜面比路面/建筑平滑(颜色分支漏检的灰亮水面)
-    #   分支3 亮度: 暗于路面中位数 -> 积水吸光偏暗
-    #   纹理/亮度分支合成"镜面互补候选", 其动态权重按候选在颜色区内外的
-    #   区分度(均值差)自适应设定: 区分度高才参与融合补召回, 区分度低自动
-    #   退化为原颜色基线, 不会引入建筑/阴影误检。
+    # 四分支互补融合(轻量近似 Prithvi-CAFE M2FAF 思想), 针对真实监控视频重调:
+    #   分支1 颜色: 蓝色调 HSV 主导 —— 命中模拟帧水面/天空倒影水面(高精度)。
+    #   分支2 镜面: 真实内涝水面多为灰绿/灰蓝(反射树冠与阴天天空), 单靠蓝色调
+    #     会大面积漏检并误检白色车身。以"绿→蓝色相 + 中低饱和 + 中等亮度 +
+    #     局部平滑(镜面) + 非纯色(有波纹亮度起伏)"联合门控, 排除树木(高纹理)、
+    #     车身(高亮或饱和)、UI 面板(纯色平坦)。
+    #   分支3 暗镜: 暗于路面中位数且平滑的吸光水面。
+    #   分支4 浊水: 航拍/泥水的黄褐色调水面, 靠强波纹起伏与平坦路面区分。
+    #   最后按连通域面积过滤: 真实积水连片成面, 车/牌/人均为碎块, 直接剔除。
     def _segment_opencv(self, frame: np.ndarray):
         h, w = frame.shape[:2]
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        g8 = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = g8.astype(np.float32)
         b = frame[:, :, 0].astype(np.int16)
+        gch = frame[:, :, 1].astype(np.int16)
         r = frame[:, :, 2].astype(np.int16)
-        # 分支1(颜色): 蓝色调主导 (B 明显大于 R), 排除灰色路面/建筑误检
-        blue_dom = ((b - r) > 18).astype(np.uint8) * 255
-        m1 = cv2.inRange(hsv, (90, 25, 40), (135, 255, 255))    # 蓝色调水面
-        m2 = cv2.inRange(hsv, (85, 10, 90), (140, 60, 235))     # 低饱和灰蓝反光水面
-        color = cv2.bitwise_or(cv2.bitwise_and(m1, blue_dom), cv2.bitwise_and(m2, blue_dom))
+        hue = hsv[:, :, 0].astype(np.int16)
+        sat = hsv[:, :, 1].astype(np.int16)
+        val = hsv[:, :, 2].astype(np.int16)
+        # 路面 ROI: 只保留下半画面, 排除天空/远景建筑
+        roi = np.zeros((h, w), bool)
+        roi[int(h * 0.35):, :] = True
 
-        # 分支2(纹理): 局部梯度平滑度(0~1), 水面镜面梯度远低于路面纹理
+        # 纹理平滑度: 水面镜面局部梯度远低于树冠/沥青颗粒/车体边缘
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         grad = cv2.GaussianBlur(cv2.magnitude(gx, gy), (15, 15), 0)
         smooth = np.clip(1.0 - grad / 45.0, 0.0, 1.0)
-        # 分支3(亮度): 相对路面中位数的偏暗程度(0~1)
-        med = float(np.median(gray[int(h * 0.35):, :]))
-        dark = np.clip((med - gray.astype(np.float32)) / 50.0 + 0.5, 0.0, 1.0)
-        # 互补候选: 纹理+亮度双分支同时高置信(颜色分支易漏的灰镜面水面)
-        mirror = smooth * dark
+        # 局部亮度起伏: 水面有波纹/反光(specular), 黑边/UI 面板是纯色平坦
+        mean = cv2.boxFilter(gray, cv2.CV_32F, (15, 15))
+        sq = cv2.boxFilter(gray * gray, cv2.CV_32F, (15, 15))
+        lstd = np.sqrt(np.clip(sq - mean * mean, 0, None))
 
-        # 自适应加权: 候选在"颜色已检出区"与"路面ROI其余区"的均值差越大,
-        # 说明该候选特征与水面越同步, 权重越高; 否则权重趋 0(退回颜色基线)
-        c_in = color > 0
-        roi = np.zeros((h, w), np.uint8)
-        roi[int(h * 0.35):, :] = 1
-        outside = (roi > 0) & (~c_in)
-        if c_in.any() and outside.any():
-            sep = float(mirror[c_in].mean()) - float(mirror[outside].mean())
-        else:
-            sep = 0.0
-        w_mirror = float(np.clip(sep * 2.5, 0.0, 0.9))
+        # 分支1(颜色)双路: 实测模拟帧水面为"高饱和强蓝镜面"(S≈96, b-r≈31,
+        # smooth≈0.63, lstd≈8), 真实误检源为"低饱和蓝物体"(幕墙 b-r19.6/S77、
+        # 墙裙 S51、指路牌 b-r61 但 smooth0.03)。两路门控互斥:
+        #   m1 极高饱和强蓝 + 高镜面平滑 → 模拟水面(S96/smooth0.63);
+        #     排除玻璃幕墙(S77/smooth0.55)/指路牌(smooth0.03)/墙体
+        #   m2 低饱和灰蓝 + 中等亮度 → 真实灰蓝水面; 排除墙体(V172)/墙裙(S51)/幕墙(S77)
+        m1 = (cv2.inRange(hsv, (90, 85, 40), (135, 255, 255)) > 0) & \
+             (smooth > 0.58) & ((b - r) > 25) & ((b - r) <= 50)
+        m2 = (cv2.inRange(hsv, (85, 10, 85), (140, 45, 150)) > 0) & \
+             ((b - r) > 4) & ((b - r) <= 25)
+        color = m1 | m2
 
-        score = color.astype(np.float32) / 255.0 + w_mirror * mirror
-        mask = (score >= 0.6).astype(np.uint8) * 255
-        # 形态学: 闭运算填补空洞, 开运算去除噪点
+        # 分支2(真实灰绿/灰蓝镜面水面): 绿-蓝色相 + 中低饱和 + 中等亮度 + 平滑 + 有起伏
+        # (lstd>10 排除玻璃幕墙低频反射; g-r<=12 排除深绿玻璃/绿墙: 幕墙 g-r18/墙体15)
+        mirror = (hue >= 35) & (hue <= 140) & (sat >= 6) & (sat <= 110) & \
+                 (val >= 60) & (val <= 220) & (smooth > 0.5) & (lstd > 10) & \
+                 ((gch - r) >= -6) & ((gch - r) <= 12)
+
+        # 分支3(暗吸光水面): 绿蓝色相 + 强波纹起伏(lstd>12 排除玻璃幕墙);
+        # g-r<=12 排除暗绿玻璃幕墙(g-r18)
+        med = float(np.median(g8[int(h * 0.35):, :]))
+        darkm = (gray < med - 10) & (smooth > 0.6) & (lstd > 12) & \
+                ((gch - r) >= -2) & ((gch - r) <= 12) & (hue >= 35) & (hue <= 140)
+
+        # 分支4(浑浊黄褐水面): 泥水/航拍褐水 hue 15-55, 靠波纹起伏与平坦路面区分;
+        # g-r<=8 排除绿树冠(绿色 g-r 大), sat<=80 排除黄车/蓝牌等高饱和物体
+        turbid = (hue >= 15) & (hue < 55) & (sat >= 8) & (sat <= 80) & \
+                 (val >= 55) & (val <= 210) & (smooth > 0.25) & (lstd > 8) & \
+                 ((gch - r) <= 8) & ((r - gch) >= -2)
+
+        score = color.astype(np.float32) + 0.85 * mirror + 0.7 * darkm + 0.7 * turbid
+        mask = ((score >= 0.6) & roi).astype(np.uint8) * 255
+        # 形态学: 闭运算连接波纹间隙, 开运算去椒盐
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        # 只保留下半画面(路面区域), 排除天空反光误检
-        mask = cv2.bitwise_and(mask, roi * 255)
+        # 连通域面积过滤(膨胀合并版): 真实积水常被车辆/路缘切成多个 2~3% 碎块,
+        # 先适度膨胀把邻近碎块并成一个连通域再按原掩码面积过滤; 墙面/车身误检
+        # 块四周孤立, 膨胀后仍 <3% 被剔除。
+        dil = cv2.dilate(mask, kernel, iterations=2)
+        n, lab, _, _ = cv2.connectedComponentsWithStats(dil, 8)
+        min_area = h * w * 0.030
+        keep = np.zeros((h, w), np.uint8)
+        for i in range(1, n):
+            comp = (lab == i) & (mask > 0)
+            if int(comp.sum()) >= min_area:
+                keep[comp] = 255
+        mask = keep
 
         ratio = float(mask.sum()) / 255.0 / (h * w)
         box = self._largest_box(mask)

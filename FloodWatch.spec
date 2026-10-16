@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['..\\run.py'],
+    ['run.py'],
     pathex=[],
     binaries=[],
     datas=[('c:\\Users\\bry15\\jupyter Projects\\视频分析技术\\flood-watch\\frontend', 'frontend')],

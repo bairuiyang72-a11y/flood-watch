@@ -50,6 +50,7 @@
       <span id="connTag" class="text-xs px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">● 已连接</span>
       <span id="clock" class="text-sm text-indigo-300 font-mono"></span>
       <span id="riskBadge" class="badge px-4 py-1.5 rounded-full text-sm font-bold text-white bg-green-500">低风险</span>
+      <a id="officerLink" href="#" target="_blank" class="text-xs px-3 py-1.5 rounded-full bg-violet-600/70 hover:bg-violet-500 border border-violet-400/50 text-violet-50">👮 民警终端</a>
     </div>
   </header>
 
@@ -115,7 +116,6 @@
       <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
         <div class="flex items-center gap-2">
           <h2 class="font-semibold text-indigo-200" id="camName">实时内涝检测</h2>
-          <span id="srcTag" class="hidden text-xs px-2 py-1 rounded-lg bg-amber-600/70 border border-amber-400/50 text-amber-100"></span>
           <span id="wxChip" class="text-xs px-2 py-1 rounded-lg bg-sky-900/60 border border-sky-500/35 text-sky-200 hidden"></span>
           <button id="btnWxVerify" class="text-xs px-2 py-1 rounded-lg bg-emerald-800/70 border border-emerald-500/40 text-emerald-200 hover:bg-emerald-700">🔍 天气验真</button>
         </div>
@@ -443,11 +443,6 @@ async function pollStatus(){
 function applyStatus(s){
   const m=s.metrics;
     $('camName').textContent=`${s.city} · ${s.cam} 实时内涝检测`;
-    const st=$('srcTag');
-    if(s.source_kind==='file'){
-      st.textContent='📹 真实视频接入 · '+(s.source_file||'');
-      st.classList.remove('hidden');
-    }else st.classList.add('hidden');
     $('fps').textContent=s.fps;
     $('detector').textContent=s.detector==='ultralytics-yolo'?'YOLO':'OpenCV';
     $('mRatio').textContent=(m.water_ratio*100).toFixed(1)+'%';
@@ -553,6 +548,8 @@ document.addEventListener('visibilitychange',()=>{
 });
 window.addEventListener('load',()=>{
   initMap();initSatMap();setupSearch();
+  // 民警终端链接: 指挥端端口 +1 (动态计算, 不硬编码)
+  $('officerLink').href=`${location.protocol}//${location.hostname||'127.0.0.1'}${location.port?':'+(Number(location.port)+1):''}`;
   loadBootstrap();               // 首屏: 单请求返回 城市+标注+状态+事件(替代原 4 波 6 请求)
   setTimeout(snapLoop,600);      // 第 2 波: 视频帧链式轮询
   setTimeout(startPolls,1500);   // 第 3 波: 周期定时器
